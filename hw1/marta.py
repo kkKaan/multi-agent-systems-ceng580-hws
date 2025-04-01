@@ -1,5 +1,5 @@
 import numpy as np
-import random
+import heapq
 import math
 from typing import List, Tuple, Dict, Set, Optional
 
@@ -94,14 +94,14 @@ def manhattan_distance(state: PuzzleState, goal: PuzzleState) -> int:
         Sum of Manhattan distances
     """
     total_distance = 0
-    # Create a mapping of tile values to their positions in the goal state
+    # Map tile values to positions in goal state
     goal_positions = {}
     for i in range(3):
         for j in range(3):
             value = goal.board[i, j]
-            if value != 0:  # Skip the blank tile
+            if value != 0:
                 goal_positions[value] = (i, j)
-    # Calculate Manhattan distance for each tile
+    # Sum Manhattan distances
     for i in range(3):
         for j in range(3):
             value = state.board[i, j]
@@ -112,100 +112,88 @@ def manhattan_distance(state: PuzzleState, goal: PuzzleState) -> int:
 
 
 class Agent:
-    """Agent that uses Real-Time A* with attraction to solve 8-puzzle."""
+    """Agent that uses Multi-Agent RTA* with attraction to solve 8-puzzle.
+       In this version, after selecting the best move the agent updates the 
+       heuristic value of its current state with the second-best neighbor value,
+       so as to discourage other agents from following the same path.
+    """
 
-    def __init__(self, initial_state: PuzzleState, goal_state: PuzzleState, agent_id: int, num_agents: int):
+    def __init__(self, initial_state: PuzzleState, goal_state: PuzzleState, attraction_weight: float = 0.5):
         """
         Initialize an agent with initial and goal states.
         
         Args:
             initial_state: Initial puzzle state
             goal_state: Goal puzzle state
-            agent_id: Unique identifier for the agent
-            num_agents: Total number of agents in the system
+            attraction_weight: Weight for the attraction component
         """
         self.current_state = initial_state
         self.goal_state = goal_state
-        self.agent_id = agent_id
-
-        # Vary attraction weights by agent to encourage diverse exploration
-        self.attraction_weight = 0.2 + (0.8 * agent_id / num_agents)
-
-        # Add a small random component to break ties differently for each agent
-        self.random_weight = 0.05 + (0.1 * random.random())
-
-        # Agents can have different preferences for certain moves
-        self.move_preferences = {}
-        available_moves = ['R', 'L', 'U', 'D']
-        random.shuffle(available_moves)
-        for i, move in enumerate(available_moves):
-            self.move_preferences[move] = i / len(available_moves)
-
+        self.attraction_weight = attraction_weight
         self.history = []  # Store state and move history
-        self.visited_states = set()  # Track visited states to avoid cycles
+        self.h_table: Dict[Tuple, float] = {}  # Learned heuristic values
 
-    def heuristic(self, state: PuzzleState, other_agents_states: List[PuzzleState]) -> float:
+    def get_learned_heuristic(self, state: PuzzleState) -> float:
         """
-        Calculate heuristic value for a state with attraction.
+        Get the learned heuristic value for a state.
+        If no learned value exists, use the default Manhattan distance.
+        """
+        return self.h_table.get(state.flatten(), manhattan_distance(state, self.goal_state))
+
+    def effective_heuristic(self, state: PuzzleState, other_agents_states: List[PuzzleState]) -> float:
+        """
+        Compute effective heuristic by combining learned heuristic and attraction component.
         
         Args:
             state: Puzzle state to evaluate
-            other_agents_states: States of other agents to consider for attraction
+            other_agents_states: List of states of other agents
             
         Returns:
-            Heuristic value
+            Effective heuristic value.
         """
-        # Base heuristic: Manhattan distance
-        h_manhattan = manhattan_distance(state, self.goal_state)
-        # State novelty: penalize revisiting states
-        h_novelty = 5.0 if state.flatten() in self.visited_states else 0.0
-
-        # Calculate repulsion from other agents (we want agents to be repelled from similar states)
-        h_repulsion = 0
+        base_value = self.get_learned_heuristic(state)
+        h_attraction = 0.0
         if other_agents_states:
             for other_state in other_agents_states:
-                matching = np.sum(state.board == other_state.board)
-                h_repulsion += matching / 9.0  # Normalize by total number of tiles
-            h_repulsion = h_repulsion / len(other_agents_states)
-
-        # Add a small random component to break ties further
-        h_random = random.random() * self.random_weight
-
-        # Combine heuristics – lower is better
-        return h_manhattan + h_novelty + (self.attraction_weight * h_repulsion) + h_random
+                # Compute the number of differing tiles as a measure of dissimilarity
+                differences = np.sum(state.board != other_state.board)
+                h_attraction += differences
+            h_attraction /= len(other_agents_states)
+        # Subtract the attraction term to favor diversity
+        return base_value - self.attraction_weight * h_attraction
 
     def choose_move(self, other_agents_states: List[PuzzleState]) -> str:
         """
-        Choose the best move based on MARTA* heuristic with softmax tie-breaking.
-        This version uses a probabilistic selection (softmax) to encourage diversity.
+        Choose the best move based on a 1-step lookahead using effective heuristic.
+        Also updates the learned heuristic value for the current state with the second-best cost.
         
         Args:
-            other_agents_states: States of other agents
+            other_agents_states: States of other agents.
             
         Returns:
-            Best move ('R', 'L', 'U', 'D')
+            Best move ('R', 'L', 'U', 'D').
         """
         possible_moves = self.current_state.get_moves()
-        move_values = []
-
+        neighbors = []
+        # Evaluate each move: cost = 1 (step cost) + effective heuristic of neighbor
         for move in possible_moves:
             next_state = self.current_state.apply_move(move)
-            # Evaluate the heuristic value and adjust slightly with move preference
-            value = self.heuristic(next_state, other_agents_states) - self.move_preferences[move] * 0.1
-            move_values.append((move, value))
+            cost = 1 + self.effective_heuristic(next_state, other_agents_states)
+            neighbors.append((move, cost))
 
-        # Use softmax over the negative heuristic values to determine probabilities.
-        beta = 1.0  # Temperature parameter (can be tuned)
-        # To prevent overflow, shift values using the minimum value.
-        min_val = min(val for _, val in move_values)
-        exp_values = [math.exp(-beta * (val - min_val)) for _, val in move_values]
-        total = sum(exp_values)
-        probabilities = [ev / total for ev in exp_values]
+        # Sort moves by cost (lower is better)
+        neighbors.sort(key=lambda x: x[1])
+        best_move, best_cost = neighbors[0]
+        # For multiple-agent RTA*, update with second-best value if available
+        if len(neighbors) > 1:
+            second_best_cost = neighbors[1][1]
+        else:
+            second_best_cost = best_cost
 
-        # Randomly choose a move according to the computed probabilities.
-        moves = [move for move, _ in move_values]
-        chosen_move = random.choices(moves, weights=probabilities, k=1)[0]
-        return chosen_move
+        # Update the learned heuristic for the current state
+        self.h_table[self.current_state.flatten()] = second_best_cost
+
+        return best_move
 
     def make_move(self, move: str) -> None:
         """
@@ -214,10 +202,7 @@ class Agent:
         Args:
             move: One of 'R', 'L', 'U', 'D'
         """
-        # Track the current state before moving
-        self.visited_states.add(self.current_state.flatten())
         self.history.append((self.current_state.flatten(), move))
-        # Apply the move
         self.current_state = self.current_state.apply_move(move)
 
     def has_reached_goal(self) -> bool:
@@ -225,24 +210,24 @@ class Agent:
         Check if the agent has reached the goal state.
         
         Returns:
-            True if current state equals goal state
+            True if current state equals goal state.
         """
         return self.current_state == self.goal_state
 
 
 class MARTASolver:
-    """Solver that uses Multiple Agents with Real-Time A* with attraction."""
+    """Solver that uses Multiple Agents with Real-Time A* with attraction (MARTA*)."""
 
     def __init__(self, initial_state: PuzzleState, goal_state: PuzzleState, num_agents: int):
         """
         Initialize the solver with a given number of agents.
         
         Args:
-            initial_state: Initial puzzle state
-            goal_state: Goal puzzle state
-            num_agents: Number of agents to use
+            initial_state: Initial puzzle state.
+            goal_state: Goal puzzle state.
+            num_agents: Number of agents to use.
         """
-        self.agents = [Agent(initial_state, goal_state, i, num_agents) for i in range(num_agents)]
+        self.agents = [Agent(initial_state, goal_state) for _ in range(num_agents)]
         self.goal_state = goal_state
         self.steps = 0
         self.max_steps = 1000  # Prevent infinite loops
@@ -252,39 +237,30 @@ class MARTASolver:
         Solve the 8-puzzle using MARTA*.
         
         Returns:
-            List of steps with agents' actions
+            List of steps with agents' actions.
         """
         solution_steps = []
-
         while self.steps < self.max_steps:
             self.steps += 1
             step_info = {"step": self.steps, "agents": []}
-
             # Get current states of all agents
             all_states = [agent.current_state for agent in self.agents]
-
-            # Process each agent
             for agent_idx, agent in enumerate(self.agents):
-                # Get states of other agents for repulsion/attraction
+                # Get states of other agents for attraction
                 other_states = [all_states[i] for i in range(len(all_states)) if i != agent_idx]
-                # Choose and make a move using the probabilistic approach
                 move = agent.choose_move(other_states)
                 agent.make_move(move)
-                # Record move information
                 step_info["agents"].append({
                     "agent_id": agent_idx + 1,
                     "move": move,
                     "state": agent.current_state.flatten()
                 })
-                # Check if any agent reached the goal
                 if agent.has_reached_goal():
                     step_info["goal_reached"] = True
                     step_info["goal_agent"] = agent_idx + 1
                     solution_steps.append(step_info)
                     return solution_steps
-
             solution_steps.append(step_info)
-
         return solution_steps
 
     def write_output(self, output_file: str, solution_steps: List[Dict]) -> None:
@@ -292,8 +268,8 @@ class MARTASolver:
         Write solution steps to output file in specified format.
         
         Args:
-            output_file: Path to output file
-            solution_steps: Solution steps from solve method
+            output_file: Path to output file.
+            solution_steps: Solution steps from solve method.
         """
         with open(output_file, 'w') as f:
             for step in solution_steps:
@@ -315,10 +291,10 @@ def read_input(input_file: str) -> Tuple[int, PuzzleState, PuzzleState]:
     Read input file and create initial and goal states.
     
     Args:
-        input_file: Path to the input file
+        input_file: Path to the input file.
         
     Returns:
-        Tuple of (num_agents, initial_state, goal_state)
+        Tuple of (num_agents, initial_state, goal_state).
     """
     with open(input_file, 'r') as f:
         lines = f.readlines()
@@ -342,14 +318,10 @@ def main():
     """Main function to solve 8-puzzle using MARTA*."""
     input_file = "input.txt"
     output_file = "output.txt"
-    # Read input and create puzzle states
     num_agents, initial_state, goal_state = read_input(input_file)
-    # Create and run the solver
     solver = MARTASolver(initial_state, goal_state, num_agents)
     solution_steps = solver.solve()
-    # Write solution to output file
     solver.write_output(output_file, solution_steps)
-    # Print summary
     goal_step = next((step for step in solution_steps if "goal_reached" in step), None)
     if goal_step:
         print(f"Puzzle solved in {goal_step['step']} steps by Agent{goal_step['goal_agent']}.")
