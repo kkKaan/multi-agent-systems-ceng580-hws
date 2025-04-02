@@ -174,3 +174,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+Multiagent-Search.pdf
+hw1/temp.txt

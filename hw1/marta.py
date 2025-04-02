@@ -1,332 +1,293 @@
-import numpy as np
-import heapq
-import math
-from typing import List, Tuple, Dict, Set, Optional
+#!/usr/bin/env python3
+"""
+MARTA* Multi-Agent Real-Time Search Implementation for the 8-Puzzle
+
+Each agent performs a one-step lookahead (RTA* style) from the current state.
+They share a global heuristic table (h_G) while maintaining their own local updates (h_L)
+for visited states. In the choice step an attraction mechanism is applied: from the candidate
+set of moves with minimum f = 1 + h(child), the agent computes an isolation measure (max Manhattan
+distance between candidate’s blank and other agents’ blanks). In addition, agents now try to select
+different moves from each other if alternative moves exist.
+
+Input:
+  - First line: number of agents (n)
+  - Next 3 lines: initial 3x3 board (row-wise, blank is denoted by 0)
+  - Next 3 lines: goal 3x3 board
+Output:
+  - For each step, each agent’s move and resulting state (flattened)
+  - When one agent reaches the goal, output the winning agent and stop.
+  
+Author: [Your Name]
+Date: [Current Date]
+"""
+
+import sys
+import copy
+import random
+from typing import List, Tuple, Dict, Optional
+
+# Global dictionaries for shared heuristic estimates
+global_h: Dict[Tuple[int, ...], int] = {}
+
+# Type alias for state representation (flattened tuple of 9 ints)
+State = Tuple[int, ...]
+
+# Goal positions for Manhattan heuristic (computed from goal state)
+goal_positions: Dict[int, Tuple[int, int]] = {}
+
+# Attraction range parameter (tunable)
+ATTRACTION_RANGE = 2  # G parameter; adjust as needed
 
 
-class PuzzleState:
-    """Represents a state of the 8-puzzle game."""
-
-    def __init__(self, board: np.ndarray):
-        """
-        Initialize a puzzle state with a 3x3 board.
-        
-        Args:
-            board: 3x3 numpy array representing the puzzle state
-        """
-        self.board = board
-        self.blank_pos = tuple(np.argwhere(board == 0)[0])
-
-    def get_moves(self) -> List[str]:
-        """
-        Returns possible moves from current state.
-        
-        Returns:
-            List of valid moves (R, L, U, D)
-        """
-        i, j = self.blank_pos
-        moves = []
-        # Right move (blank moves left)
-        if j > 0:
-            moves.append('R')
-        # Left move (blank moves right)
-        if j < 2:
-            moves.append('L')
-        # Up move (blank moves down)
-        if i < 2:
-            moves.append('U')
-        # Down move (blank moves up)
-        if i > 0:
-            moves.append('D')
-        return moves
-
-    def apply_move(self, move: str) -> 'PuzzleState':
-        """
-        Apply a move to the current state and return a new state.
-        Note: moves are from the blank tile's perspective (opposite of the named direction)
-        
-        Args:
-            move: One of 'R', 'L', 'U', 'D'
-            
-        Returns:
-            New PuzzleState after applying the move
-        """
-        i, j = self.blank_pos
-        new_board = self.board.copy()
-        if move == 'R':  # Blank moves left
-            new_board[i, j], new_board[i, j - 1] = new_board[i, j - 1], new_board[i, j]
-        elif move == 'L':  # Blank moves right
-            new_board[i, j], new_board[i, j + 1] = new_board[i, j + 1], new_board[i, j]
-        elif move == 'U':  # Blank moves down
-            new_board[i, j], new_board[i + 1, j] = new_board[i + 1, j], new_board[i, j]
-        elif move == 'D':  # Blank moves up
-            new_board[i, j], new_board[i - 1, j] = new_board[i - 1, j], new_board[i, j]
-        return PuzzleState(new_board)
-
-    def flatten(self) -> Tuple:
-        """
-        Returns a flattened tuple representation of the board for hashing.
-        
-        Returns:
-            Tuple representation of the board
-        """
-        return tuple(self.board.flatten())
-
-    def __eq__(self, other):
-        return np.array_equal(self.board, other.board)
-
-    def __hash__(self):
-        return hash(self.flatten())
-
-    def __str__(self):
-        return str(self.board)
+def read_input(filename: str) -> Tuple[int, State, State]:
+    """Reads input file and returns number of agents, initial state and goal state."""
+    with open(filename, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    num_agents = int(lines[0])
+    init_board = []
+    goal_board = []
+    # next 3 lines: initial state
+    for i in range(1, 4):
+        init_board.extend([int(x) for x in lines[i].split()])
+    # next 3 lines: goal state
+    for i in range(4, 7):
+        goal_board.extend([int(x) for x in lines[i].split()])
+    return num_agents, tuple(init_board), tuple(goal_board)
 
 
-def manhattan_distance(state: PuzzleState, goal: PuzzleState) -> int:
+def write_output(filename: str, output_lines: List[str]) -> None:
+    """Writes the list of output lines to output file."""
+    with open(filename, 'w') as f:
+        for line in output_lines:
+            f.write(line + '\n')
+
+
+def manhattan_heuristic(state: State) -> int:
+    """Computes the sum of Manhattan distances for all tiles (ignoring blank) given the global goal_positions."""
+    total = 0
+    for index, tile in enumerate(state):
+        if tile == 0:
+            continue
+        current_row, current_col = divmod(index, 3)
+        goal_row, goal_col = goal_positions[tile]
+        total += abs(current_row - goal_row) + abs(current_col - goal_col)
+    return total
+
+
+def get_blank_pos(state: State) -> Tuple[int, int]:
+    """Returns (row, col) of the blank (0) in the given state."""
+    idx = state.index(0)
+    return divmod(idx, 3)
+
+
+def generate_neighbors(state: State) -> List[Tuple[State, str]]:
     """
-    Calculate the sum of Manhattan distances of misplaced tiles.
-    
-    Args:
-        state: Current puzzle state
-        goal: Goal puzzle state
-        
-    Returns:
-        Sum of Manhattan distances
+    Given a state, returns list of (neighbor_state, move_letter) pairs.
+    The move letter indicates the direction of the tile that moves into the blank:
+      - 'D': tile from above moves down
+      - 'U': tile from below moves up
+      - 'R': tile from left moves right
+      - 'L': tile from right moves left
     """
-    total_distance = 0
-    # Map tile values to positions in goal state
-    goal_positions = {}
-    for i in range(3):
-        for j in range(3):
-            value = goal.board[i, j]
-            if value != 0:
-                goal_positions[value] = (i, j)
-    # Sum Manhattan distances
-    for i in range(3):
-        for j in range(3):
-            value = state.board[i, j]
-            if value != 0 and value in goal_positions:
-                gi, gj = goal_positions[value]
-                total_distance += abs(i - gi) + abs(j - gj)
-    return total_distance
+    neighbors = []
+    blank_row, blank_col = get_blank_pos(state)
+    state_list = list(state)
+
+    def swap_and_create(new_r: int, new_c: int, move_letter: str) -> State:
+        new_state = list(state)
+        blank_index = blank_row * 3 + blank_col
+        neighbor_index = new_r * 3 + new_c
+        # Swap positions: the neighbor tile moves into blank.
+        new_state[blank_index], new_state[neighbor_index] = new_state[neighbor_index], new_state[blank_index]
+        return tuple(new_state)
+
+    if blank_row > 0:
+        neighbors.append((swap_and_create(blank_row - 1, blank_col, 'D'), 'D'))
+    if blank_row < 2:
+        neighbors.append((swap_and_create(blank_row + 1, blank_col, 'U'), 'U'))
+    if blank_col > 0:
+        neighbors.append((swap_and_create(blank_row, blank_col - 1, 'R'), 'R'))
+    if blank_col < 2:
+        neighbors.append((swap_and_create(blank_row, blank_col + 1, 'L'), 'L'))
+    return neighbors
+
+
+def state_to_vector(state: State) -> str:
+    """Converts the state tuple into a space separated vector string."""
+    return ' '.join(str(x) for x in state)
 
 
 class Agent:
-    """Agent that uses Multi-Agent RTA* with attraction to solve 8-puzzle.
-       In this version, after selecting the best move the agent updates the 
-       heuristic value of its current state with the second-best neighbor value,
-       so as to discourage other agents from following the same path.
-    """
+    """Class representing an agent in the multi-agent MARTA* search."""
 
-    def __init__(self, initial_state: PuzzleState, goal_state: PuzzleState, attraction_weight: float = 0.5):
-        """
-        Initialize an agent with initial and goal states.
-        
-        Args:
-            initial_state: Initial puzzle state
-            goal_state: Goal puzzle state
-            attraction_weight: Weight for the attraction component
-        """
-        self.current_state = initial_state
-        self.goal_state = goal_state
-        self.attraction_weight = attraction_weight
-        self.history = []  # Store state and move history
-        self.h_table: Dict[Tuple, float] = {}  # Learned heuristic values
+    def __init__(self, agent_id: int, init_state: State):
+        self.agent_id = agent_id
+        self.current_state: State = init_state
+        # Local heuristic updates for visited states: state -> value
+        self.h_local: Dict[State, int] = {}
+        # Keep track of visited states
+        self.visited = set()
+        # Record the last move taken (letter)
+        self.last_move: Optional[str] = None
+        # Give each agent a unique preference for move directions
+        self.direction_preferences = {
+            1: ['U', 'L', 'D', 'R'],  # Agent 1 prefers up, then left...
+            2: ['R', 'D', 'L', 'U'],  # Agent 2 prefers right, then down...
+            3: ['L', 'U', 'R', 'D']  # Agent 3 prefers left, then up...
+        }.get(agent_id, list("UDLR"))  # Default if more than 3 agents
 
-    def get_learned_heuristic(self, state: PuzzleState) -> float:
-        """
-        Get the learned heuristic value for a state.
-        If no learned value exists, use the default Manhattan distance.
-        """
-        return self.h_table.get(state.flatten(), manhattan_distance(state, self.goal_state))
-
-    def effective_heuristic(self, state: PuzzleState, other_agents_states: List[PuzzleState]) -> float:
-        """
-        Compute effective heuristic by combining learned heuristic and attraction component.
-        
-        Args:
-            state: Puzzle state to evaluate
-            other_agents_states: List of states of other agents
-            
-        Returns:
-            Effective heuristic value.
-        """
-        base_value = self.get_learned_heuristic(state)
-        h_attraction = 0.0
-        if other_agents_states:
-            for other_state in other_agents_states:
-                # Compute the number of differing tiles as a measure of dissimilarity
-                differences = np.sum(state.board != other_state.board)
-                h_attraction += differences
-            h_attraction /= len(other_agents_states)
-        # Subtract the attraction term to favor diversity
-        return base_value - self.attraction_weight * h_attraction
-
-    def choose_move(self, other_agents_states: List[PuzzleState]) -> str:
-        """
-        Choose the best move based on a 1-step lookahead using effective heuristic.
-        Also updates the learned heuristic value for the current state with the second-best cost.
-        
-        Args:
-            other_agents_states: States of other agents.
-            
-        Returns:
-            Best move ('R', 'L', 'U', 'D').
-        """
-        possible_moves = self.current_state.get_moves()
-        neighbors = []
-        # Evaluate each move: cost = 1 (step cost) + effective heuristic of neighbor
-        for move in possible_moves:
-            next_state = self.current_state.apply_move(move)
-            cost = 1 + self.effective_heuristic(next_state, other_agents_states)
-            neighbors.append((move, cost))
-
-        # Sort moves by cost (lower is better)
-        neighbors.sort(key=lambda x: x[1])
-        best_move, best_cost = neighbors[0]
-        # For multiple-agent RTA*, update with second-best value if available
-        if len(neighbors) > 1:
-            second_best_cost = neighbors[1][1]
+    def get_heuristic(self, state: State) -> int:
+        """Returns the heuristic value to use for a given state."""
+        if state in self.visited:
+            return self.h_local.get(state, global_h.get(state, manhattan_heuristic(state)))
         else:
-            second_best_cost = best_cost
+            if state not in global_h:
+                global_h[state] = manhattan_heuristic(state)
+            return global_h[state]
 
-        # Update the learned heuristic for the current state
-        self.h_table[self.current_state.flatten()] = second_best_cost
+    def update_heuristics(self, current_state: State, best_f: int, second_best_f: Optional[int]) -> None:
+        """Updates the global and local heuristic estimates for the given state."""
+        global_h[current_state] = best_f
+        if second_best_f is None:
+            self.h_local[current_state] = float('inf')
+        else:
+            self.h_local[current_state] = second_best_f
 
-        return best_move
+    def mark_visited(self, state: State) -> None:
+        """Mark a state as visited."""
+        self.visited.add(state)
 
-    def make_move(self, move: str) -> None:
+    def choose_move(self, agents_current: List[State],
+                    taken_candidates: List[Tuple[State, str]]) -> Tuple[State, str]:
         """
-        Make a move and update agent's state.
-        
-        Args:
-            move: One of 'R', 'L', 'U', 'D'
+        Performs one-step lookahead from current state.
+        Returns the chosen next state and the move letter.
+        Prioritizes choosing different moves from other agents when possible.
         """
-        self.history.append((self.current_state.flatten(), move))
-        self.current_state = self.current_state.apply_move(move)
+        neighbors = generate_neighbors(self.current_state)
+        if not neighbors:
+            return self.current_state, ''
 
-    def has_reached_goal(self) -> bool:
-        """
-        Check if the agent has reached the goal state.
-        
-        Returns:
-            True if current state equals goal state.
-        """
-        return self.current_state == self.goal_state
+        # Get all available move directions from the current state
+        available_moves = [move for _, move in neighbors]
 
+        # Get moves already taken by other agents in this step
+        taken_moves = [move for _, move in taken_candidates]
 
-class MARTASolver:
-    """Solver that uses Multiple Agents with Real-Time A* with attraction (MARTA*)."""
+        # Force a different move if possible (instead of just providing a bonus)
+        unique_moves = [move for move in available_moves if move not in taken_moves]
 
-    def __init__(self, initial_state: PuzzleState, goal_state: PuzzleState, num_agents: int):
-        """
-        Initialize the solver with a given number of agents.
-        
-        Args:
-            initial_state: Initial puzzle state.
-            goal_state: Goal puzzle state.
-            num_agents: Number of agents to use.
-        """
-        self.agents = [Agent(initial_state, goal_state) for _ in range(num_agents)]
-        self.goal_state = goal_state
-        self.steps = 0
-        self.max_steps = 1000  # Prevent infinite loops
+        # If there are unique moves available, restrict choices to these
+        preferred_neighbors = []
+        if unique_moves:
+            # Only consider neighbors with unique moves
+            preferred_neighbors = [(state, move) for state, move in neighbors if move in unique_moves]
+        else:
+            # If all possible moves have been taken, use any available move
+            preferred_neighbors = neighbors
 
-    def solve(self) -> List[Dict]:
-        """
-        Solve the 8-puzzle using MARTA*.
-        
-        Returns:
-            List of steps with agents' actions.
-        """
-        solution_steps = []
-        while self.steps < self.max_steps:
-            self.steps += 1
-            step_info = {"step": self.steps, "agents": []}
-            # Get current states of all agents
-            all_states = [agent.current_state for agent in self.agents]
-            for agent_idx, agent in enumerate(self.agents):
-                # Get states of other agents for attraction
-                other_states = [all_states[i] for i in range(len(all_states)) if i != agent_idx]
-                move = agent.choose_move(other_states)
-                agent.make_move(move)
-                step_info["agents"].append({
-                    "agent_id": agent_idx + 1,
-                    "move": move,
-                    "state": agent.current_state.flatten()
-                })
-                if agent.has_reached_goal():
-                    step_info["goal_reached"] = True
-                    step_info["goal_agent"] = agent_idx + 1
-                    solution_steps.append(step_info)
-                    return solution_steps
-            solution_steps.append(step_info)
-        return solution_steps
+        # Compute f-values for the preferred neighbors
+        f_values = []
+        for n_state, move_letter in preferred_neighbors:
+            h_val = self.get_heuristic(n_state)
+            f_val = 1 + h_val
 
-    def write_output(self, output_file: str, solution_steps: List[Dict]) -> None:
-        """
-        Write solution steps to output file in specified format.
-        
-        Args:
-            output_file: Path to output file.
-            solution_steps: Solution steps from solve method.
-        """
-        with open(output_file, 'w') as f:
-            for step in solution_steps:
-                f.write(f"Step:{step['step']}\n")
-                for agent_info in step["agents"]:
-                    agent_id = agent_info["agent_id"]
-                    move = agent_info["move"]
-                    state = agent_info["state"]
-                    state_str = ' '.join(map(str, state))
-                    f.write(f"Agent{agent_id}: {move} [{state_str}]\n")
-                if "goal_reached" in step:
-                    f.write(f"\nAgent{step['goal_agent']} reaches the goal.\n")
-                    break
-                f.write("\n")
+            # Add agent-specific preference bonus
+            try:
+                preference_bonus = 0.1 * (4 - self.direction_preferences.index(move_letter)) / 10
+                f_val -= preference_bonus  # Make preferred directions slightly more attractive
+            except ValueError:
+                pass
+
+            f_values.append((n_state, move_letter, f_val))
+
+        # Choose the best move available (lowest f-value)
+        if f_values:
+            min_f = min(f for (_, _, f) in f_values)
+            best_moves = [(state, move) for state, move, f in f_values if f == min_f]
+
+            # Use agent_id as seed to ensure different random choices
+            random.seed(self.agent_id + len(taken_candidates))
+            chosen_state, chosen_move = random.choice(best_moves)
+        else:
+            # Fallback - should rarely happen
+            chosen_state, chosen_move = random.choice(neighbors)
+
+        # Calculate best/second best f for heuristic updates
+        all_f_values = []
+        for n_state, move_letter in neighbors:
+            h_val = self.get_heuristic(n_state)
+            f_val = 1 + h_val
+            all_f_values.append((n_state, move_letter, f_val))
+        sorted_f = sorted(all_f_values, key=lambda x: x[2])
+        best_f = sorted_f[0][2]
+        second_best_f = sorted_f[1][2] if len(sorted_f) > 1 else None
+
+        self.update_heuristics(self.current_state, best_f, second_best_f)
+        self.mark_visited(self.current_state)
+        self.last_move = chosen_move
+        return chosen_state, chosen_move
 
 
-def read_input(input_file: str) -> Tuple[int, PuzzleState, PuzzleState]:
+def marta_star(num_agents: int, init_state: State, goal_state: State) -> List[str]:
     """
-    Read input file and create initial and goal states.
-    
-    Args:
-        input_file: Path to the input file.
-        
-    Returns:
-        Tuple of (num_agents, initial_state, goal_state).
+    Runs the multi-agent MARTA* search on the 8-puzzle.
+    Returns the list of output lines.
     """
-    with open(input_file, 'r') as f:
-        lines = f.readlines()
-    num_agents = int(lines[0].strip())
-    # Parse initial state
-    initial_board = np.zeros((3, 3), dtype=int)
-    for i in range(3):
-        row = lines[i + 1].strip().split()
-        for j in range(3):
-            initial_board[i, j] = int(row[j])
-    # Parse goal state
-    goal_board = np.zeros((3, 3), dtype=int)
-    for i in range(3):
-        row = lines[i + 4].strip().split()
-        for j in range(3):
-            goal_board[i, j] = int(row[j])
-    return num_agents, PuzzleState(initial_board), PuzzleState(goal_board)
+    output_lines = []
+    for index, tile in enumerate(goal_state):
+        row, col = divmod(index, 3)
+        goal_positions[tile] = (row, col)
+    if init_state not in global_h:
+        global_h[init_state] = manhattan_heuristic(init_state)
+
+    agents = [Agent(agent_id=i + 1, init_state=init_state) for i in range(num_agents)]
+    step = 0
+    reached_agent_id = None
+
+    while True:
+        step += 1
+        output_lines.append(f"Step {step}: ")
+        agents_current_states = [agent.current_state for agent in agents]
+        new_states = []
+        moves = []
+        # This list keeps track of (state, move) chosen by previous agents in this step.
+        taken_candidates: List[Tuple[State, str]] = []
+        for agent in agents:
+            if agent.current_state == goal_state:
+                new_states.append(agent.current_state)
+                moves.append('')
+                continue
+            next_state, move_letter = agent.choose_move(agents_current_states, taken_candidates)
+            # Record the candidate move to avoid duplication by subsequent agents if alternatives exist.
+            taken_candidates.append((next_state, move_letter))
+            new_states.append(next_state)
+            moves.append(move_letter)
+        for i, agent in enumerate(agents):
+            agent.current_state = new_states[i]
+            line = f"Agent{i+1}: {moves[i]} [{state_to_vector(agent.current_state)}]"
+            output_lines.append(line)
+        output_lines.append("")
+        for agent in agents:
+            if agent.current_state == goal_state:
+                reached_agent_id = agent.agent_id
+                break
+        if reached_agent_id is not None:
+            output_lines.append(f"Agent{reached_agent_id} reaches the goal .")
+            break
+        if step > 1000:
+            output_lines.append("No solution found within 1000 steps.")
+            break
+    return output_lines
 
 
-def main():
-    """Main function to solve 8-puzzle using MARTA*."""
-    input_file = "input.txt"
-    output_file = "output.txt"
-    num_agents, initial_state, goal_state = read_input(input_file)
-    solver = MARTASolver(initial_state, goal_state, num_agents)
-    solution_steps = solver.solve()
-    solver.write_output(output_file, solution_steps)
-    goal_step = next((step for step in solution_steps if "goal_reached" in step), None)
-    if goal_step:
-        print(f"Puzzle solved in {goal_step['step']} steps by Agent{goal_step['goal_agent']}.")
-    else:
-        print("Failed to solve puzzle within maximum steps.")
+def main() -> None:
+    """Main function: read input, run MARTA*, and write output."""
+    input_filename = "input.txt"
+    output_filename = "output.txt"
+    num_agents, init_state, goal_state = read_input(input_filename)
+    output_lines = marta_star(num_agents, init_state, goal_state)
+    write_output(output_filename, output_lines)
 
 
 if __name__ == "__main__":
