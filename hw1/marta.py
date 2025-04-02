@@ -6,7 +6,7 @@ Each agent performs a one-step lookahead (RTA* style) from the current state.
 They share a global heuristic table (h_G) while maintaining their own local updates (h_L)
 for visited states. In the choice step an attraction mechanism is applied: from the candidate
 set of moves with minimum f = 1 + h(child), the agent computes an isolation measure (max Manhattan
-distance between candidate’s blank and other agents’ blanks). In addition, agents now try to select
+distance between candidate's blank and other agents' blanks). In addition, agents now try to select
 different moves from each other if alternative moves exist.
 
 Input:
@@ -14,11 +14,10 @@ Input:
   - Next 3 lines: initial 3x3 board (row-wise, blank is denoted by 0)
   - Next 3 lines: goal 3x3 board
 Output:
-  - For each step, each agent’s move and resulting state (flattened)
+  - For each step, each agent's move and resulting state (flattened)
   - When one agent reaches the goal, output the winning agent and stop.
   
-Author: [Your Name]
-Date: [Current Date]
+Author: Kaan Karacanta
 """
 
 import sys
@@ -247,7 +246,7 @@ def marta_star(num_agents: int, init_state: State, goal_state: State) -> List[st
 
     while True:
         step += 1
-        output_lines.append(f"Step {step}: ")
+        output_lines.append(f"Step : {step} ")
         agents_current_states = [agent.current_state for agent in agents]
         new_states = []
         moves = []
