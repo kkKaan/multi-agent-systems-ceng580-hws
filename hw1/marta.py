@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 MARTA* Multi-Agent Real-Time Search Implementation for the 8-Puzzle
 
@@ -20,8 +19,6 @@ Output:
 Author: Kaan Karacanta
 """
 
-import sys
-import copy
 import random
 from typing import List, Tuple, Dict, Optional
 
@@ -35,7 +32,7 @@ State = Tuple[int, ...]
 goal_positions: Dict[int, Tuple[int, int]] = {}
 
 # Attraction range parameter (tunable)
-ATTRACTION_RANGE = 2  # G parameter; adjust as needed
+ATTRACTION_RANGE = 2  # G parameter
 
 
 def read_input(filename: str) -> Tuple[int, State, State]:
@@ -130,9 +127,9 @@ class Agent:
         self.last_move: Optional[str] = None
         # Give each agent a unique preference for move directions
         self.direction_preferences = {
-            1: ['U', 'L', 'D', 'R'],  # Agent 1 prefers up, then left...
-            2: ['R', 'D', 'L', 'U'],  # Agent 2 prefers right, then down...
-            3: ['L', 'U', 'R', 'D']  # Agent 3 prefers left, then up...
+            1: ['U', 'L', 'D', 'R'],  # Agent 1 prefers up, then left
+            2: ['R', 'D', 'L', 'U'],
+            3: ['L', 'U', 'R', 'D']
         }.get(agent_id, list("UDLR"))  # Default if more than 3 agents
 
     def get_heuristic(self, state: State) -> int:
@@ -159,60 +156,82 @@ class Agent:
     def choose_move(self, agents_current: List[State],
                     taken_candidates: List[Tuple[State, str]]) -> Tuple[State, str]:
         """
-        Performs one-step lookahead from current state.
+        Performs one-step lookahead from the current state.
         Returns the chosen next state and the move letter.
-        Prioritizes choosing different moves from other agents when possible.
+        Incorporates an attraction mechanism:
+        - First, restrict to moves that are not already taken by other agents (if possible).
+        - Compute f = 1 + h(child) for each neighbor.
+        - From those with minimum f, compute an isolation measure:
+                isolation = max(ManhattanDistance(candidate_blank, other_agent_blank))
+            over the other agents' current states.
+        - If at least one candidate has an isolation measure <= ATTRACTION_RANGE,
+            choose randomly among those; otherwise, choose the candidate with minimum isolation.
         """
         neighbors = generate_neighbors(self.current_state)
         if not neighbors:
             return self.current_state, ''
 
-        # Get all available move directions from the current state
+        # Get all available move letters from neighbors
         available_moves = [move for _, move in neighbors]
-
-        # Get moves already taken by other agents in this step
+        # Moves already taken by other agents in this step
         taken_moves = [move for _, move in taken_candidates]
-
-        # Force a different move if possible (instead of just providing a bonus)
+        # Prefer moves that have not been taken by other agents
         unique_moves = [move for move in available_moves if move not in taken_moves]
-
-        # If there are unique moves available, restrict choices to these
-        preferred_neighbors = []
         if unique_moves:
-            # Only consider neighbors with unique moves
             preferred_neighbors = [(state, move) for state, move in neighbors if move in unique_moves]
         else:
-            # If all possible moves have been taken, use any available move
             preferred_neighbors = neighbors
 
         # Compute f-values for the preferred neighbors
-        f_values = []
+        candidate_list = []
         for n_state, move_letter in preferred_neighbors:
             h_val = self.get_heuristic(n_state)
             f_val = 1 + h_val
-
-            # Add agent-specific preference bonus
             try:
+                # Apply preference bonus based on the agent's direction preference, to see different moves I added
                 preference_bonus = 0.1 * (4 - self.direction_preferences.index(move_letter)) / 10
-                f_val -= preference_bonus  # Make preferred directions slightly more attractive
+                f_val -= preference_bonus
             except ValueError:
                 pass
+            candidate_list.append((n_state, move_letter, f_val))
 
-            f_values.append((n_state, move_letter, f_val))
+        # Select candidate moves with minimum f-value
+        min_f = min(f for (_, _, f) in candidate_list)
+        candidate_moves = [(state, move, f) for (state, move, f) in candidate_list if f == min_f]
 
-        # Choose the best move available (lowest f-value)
-        if f_values:
-            min_f = min(f for (_, _, f) in f_values)
-            best_moves = [(state, move) for state, move, f in f_values if f == min_f]
+        # Incorporate the attraction mechanism:
+        # For each candidate, compute its isolation measure based on its blank position relative
+        # to the blank positions of the other agents (using Manhattan distance).
+        candidate_isolations = []
+        for cand_state, move_letter, f_val in candidate_moves:
+            cand_blank = get_blank_pos(cand_state)
+            distances = []
+            for other_state in agents_current:
+                # Skip self's current state
+                if other_state == self.current_state:
+                    continue
+                other_blank = get_blank_pos(other_state)
+                d = abs(cand_blank[0] - other_blank[0]) + abs(cand_blank[1] - other_blank[1])
+                distances.append(d)
+            # If no other agents, set isolation to infinity
+            isolation = max(distances) if distances else float('inf')
+            candidate_isolations.append((cand_state, move_letter, f_val, isolation))
 
-            # Use agent_id as seed to ensure different random choices
-            random.seed(self.agent_id + len(taken_candidates))
-            chosen_state, chosen_move = random.choice(best_moves)
+        # Determine candidates based on the attraction threshold (ATTRACTION_RANGE)
+        # If at least one candidate has isolation measure <= ATTRACTION_RANGE,
+        # choose randomly among them; otherwise, choose the candidate with the minimum isolation.
+        candidates_in_range = [
+            (s, m, f, iso) for (s, m, f, iso) in candidate_isolations if iso <= ATTRACTION_RANGE
+        ]
+        if candidates_in_range:
+            chosen_candidate = random.choice(candidates_in_range)
         else:
-            # Fallback - should rarely happen
-            chosen_state, chosen_move = random.choice(neighbors)
+            min_iso = min(iso for (_, _, _, iso) in candidate_isolations)
+            best_candidates = [(s, m, f, iso) for (s, m, f, iso) in candidate_isolations if iso == min_iso]
+            chosen_candidate = random.choice(best_candidates)
+        chosen_state, chosen_move, chosen_f, chosen_iso = chosen_candidate
 
-        # Calculate best/second best f for heuristic updates
+        # Compute heuristic updates for all neighbors (regardless of the attraction mechanism)
         all_f_values = []
         for n_state, move_letter in neighbors:
             h_val = self.get_heuristic(n_state)
@@ -272,7 +291,7 @@ def marta_star(num_agents: int, init_state: State, goal_state: State) -> List[st
                 reached_agent_id = agent.agent_id
                 break
         if reached_agent_id is not None:
-            output_lines.append(f"Agent{reached_agent_id} reaches the goal .")
+            output_lines.append(f"Agent{reached_agent_id} reaches the goal.")
             break
         if step > 1000:
             output_lines.append("No solution found within 1000 steps.")
