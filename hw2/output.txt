@@ -6,5 +6,5 @@ Agent04, PathCost : 2, Path : (107,220) [107,219] (107,220)
 Agent05, PathCost : 4, Path : (327,26) (327,27) [326,27] (327,27) (327,26)
 Agent06, PathCost : 2, Path : (99,147) [99,148] (99,147)
 Agent07, PathCost : 6, Path : (203,69) (203,70) (203,71) [203,72] (203,71) (203,70) (203,69)
-Agent08, PathCost : 1, Path : [16,65] [16,65]
+Agent08, PathCost : 0, Path : [16,65]
 Agent09, PathCost : 2, Path : (351,492) [351,491] (351,492)

@@ -14,7 +14,7 @@ def load_map(map_filename):
     H = len(grid)
     W = len(grid[0])
     obstacles = [[(grid[y][x] != '.' and grid[y][x] != 'G') for x in range(W)] for y in range(H)]
-    return obstacles, H, W
+    return obstacles, H, W, grid
 
 
 def load_scen(scen_filename):
@@ -38,6 +38,10 @@ def round_trip(start, goal, obs, cons):
     W, H = len(obs[0]), len(obs)
     sx, sy = start
     gx, gy = goal
+
+    # Special case: if start and goal are the same location
+    if (sx, sy) == (gx, gy):
+        return [(sx, sy)], 0  # Return a path with just one point and cost 0
 
     def neigh(x, y):
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
@@ -157,9 +161,16 @@ def main():
         print("Usage: mapf_cbs.py <map.map> <scen.map.scen>")
         sys.exit(1)
     map_file, scen_file = sys.argv[1], sys.argv[2]
-    obstacles, W, H = load_map(map_file)
+    obstacles, H, W, grid = load_map(map_file)
     agents = load_scen(scen_file)
+
+    # Print agent starting positions to terminal
+    for k, ((sx, sy), _) in enumerate(agents):
+        map_char = grid[sy][sx]
+        print(f"Agent{str(k).zfill(2)} starting position: ({sx},{sy}) [{map_char}]")
+
     solution = cbs(obstacles, agents)
+
     with open("output.txt", "w") as out:
         for k, (_, g) in enumerate(agents):
             path = solution[k]
