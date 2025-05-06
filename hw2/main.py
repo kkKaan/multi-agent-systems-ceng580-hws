@@ -46,7 +46,6 @@ def round_trip(start, goal, obs, cons):
                 yield nx, ny
 
     def heuristic(x, y, stage):
-        # stage 0: s→g→s, stage 1: back to s:contentReference[oaicite:2]{index=2}
         h0 = math.hypot(x - gx, y - gy) + math.hypot(gx - sx, gy - sy)
         h1 = math.hypot(x - sx, y - sy)
         return h0 if stage == 0 else h1
