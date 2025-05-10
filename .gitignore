@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .DS*
 
+hw2/scen-even
 
 # C extensions
 *.so
